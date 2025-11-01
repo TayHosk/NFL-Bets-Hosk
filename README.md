@@ -1,27 +1,21 @@
-# NFL Player Prop Model (Google Sheets v5)
+# NFL Player Prop Model (v7.2)
 
-This Streamlit app uses Google Sheets data to calculate probability estimates for NFL player props (passing, rushing, receiving, and anytime TD).
+This app pulls 11 Google Sheets (season totals) and estimates player prop probabilities.
 
-## 🚀 Setup Instructions
+## Features
+- Auto-cleans Google Sheets headers (so small spelling/spacing issues don’t break it)
+- Works with season totals (no per-game logs needed)
+- Multiple props per player (rushing, receiving, passing, receptions, targets, carries, anytime TD)
+- Plotly charts
+- Debug sidebar to see what columns were actually loaded
 
-### 1. Clone or download this repo
-```
-git clone https://github.com/YOUR_USERNAME/nfl-prop-model.git
-cd nfl-prop-model
-```
-
-### 2. Upload the following files to your repo
-- app_v5_prop_model.py
-- requirements.txt
-- README.md
-
-### 3. Deploy to Streamlit
-1. Go to [https://share.streamlit.io](https://share.streamlit.io)
-2. Click **New App**
-3. Connect your GitHub repository
-4. Set **Main file path** to `app_v5_prop_model.py`
-5. Deploy 🚀
-
-### 4. Notes
-- Make sure all Google Sheets are shared as **"Anyone with the link"**
-- Use published CSV URLs for Google Sheets (already built into this version)
+## Deploy
+1. Create a GitHub repo
+2. Add:
+   - app_v7_2_prop_model.py
+   - requirements.txt
+   - README.md
+3. Go to Streamlit Cloud → New App
+4. Select your repo
+5. Set **main file** to `app_v7_2_prop_model.py`
+6. Deploy
