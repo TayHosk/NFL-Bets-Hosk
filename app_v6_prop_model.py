@@ -1,6 +1,5 @@
-# app_v7_6_prop_model_combined_td.py
-# NFL Player Prop Model – Based on stable v7.3 core
-# Adds combined Rushing + Receiving Anytime TD logic with defense adjustment
+# app_v7_7_prop_model_combined_td_dropdown.py
+# Based on stable v7.6 core — adds searchable dropdowns for player + team
 
 import streamlit as st
 import pandas as pd
@@ -9,9 +8,11 @@ from scipy.stats import norm
 import plotly.express as px
 import re
 
-st.set_page_config(page_title="NFL Player Prop Model (v7.6)", layout="centered")
+st.set_page_config(page_title="NFL Player Prop Model (v7.7)", layout="centered")
 
-# 1) your sheets (same as before)
+# -------------------------------
+# 1) Google Sheets
+# -------------------------------
 SHEETS = {
     "total_offense": "https://docs.google.com/spreadsheets/d/1DFZRqOiMXbIoEeLaNaWh-4srxeWaXscqJxIAHt9yq48/export?format=csv",
     "total_passing": "https://docs.google.com/spreadsheets/d/1QclB5ajymBsCC09j8s4Gie_bxj4ebJwEw4kihG6uCng/export?format=csv",
@@ -26,6 +27,9 @@ SHEETS = {
     "def_te": "https://docs.google.com/spreadsheets/d/1yMpgtx1ObYLDVufTMR5Se3KrMi1rG6UzMzLcoptwhi4/export?format=csv",
 }
 
+# -------------------------------
+# 2) Data Loaders
+# -------------------------------
 def normalize_header(name: str) -> str:
     if not isinstance(name, str):
         name = str(name)
@@ -47,16 +51,12 @@ def load_all():
     return {name: load_and_clean(url) for name, url in SHEETS.items()}
 
 data = load_all()
+p_rec, p_rush, p_pass = data["player_receiving"], data["player_rushing"], data["player_passing"]
+d_rb, d_qb, d_wr, d_te = data["def_rb"], data["def_qb"], data["def_wr"], data["def_te"]
 
-p_rec = data["player_receiving"]
-p_rush = data["player_rushing"]
-p_pass = data["player_passing"]
-d_rb = data["def_rb"]
-d_qb = data["def_qb"]
-d_wr = data["def_wr"]
-d_te = data["def_te"]
-
-# sidebar debug
+# -------------------------------
+# 3) Sidebar Debug
+# -------------------------------
 with st.sidebar:
     st.header("🔎 Debug")
     st.write("Receiving cols:", list(p_rec.columns))
@@ -65,16 +65,17 @@ with st.sidebar:
     st.write("Def RB cols:", list(d_rb.columns))
     st.write("Def WR cols:", list(d_wr.columns))
     st.write("Def TE cols:", list(d_te.columns))
-    st.write("Note: v7.6 keeps v7.3 base + adds combined rushing/receiving TD logic")
+    st.write("Note: v7.7 adds dropdowns for player + team selection")
 
-# helper: find player in a specific df
+# -------------------------------
+# 4) Helper Functions
+# -------------------------------
 def find_player_in(df: pd.DataFrame, player_name: str):
     if "player" not in df.columns:
         return None
     mask = df["player"].astype(str).str.lower() == player_name.lower()
     return df[mask].copy() if mask.any() else None
 
-# detect stat column
 def detect_stat_col(df: pd.DataFrame, prop: str):
     cols = list(df.columns)
     norm = [normalize_header(c) for c in cols]
@@ -92,7 +93,6 @@ def detect_stat_col(df: pd.DataFrame, prop: str):
             return cols[norm.index(cand)]
     return None
 
-# pick defense df per prop
 def pick_def_df(prop: str, pos: str):
     if prop == "passing_yards":
         return d_qb
@@ -106,7 +106,6 @@ def pick_def_df(prop: str, pos: str):
         return d_wr
     return None
 
-# detect defense column
 def detect_def_col(def_df: pd.DataFrame, prop: str):
     cols = list(def_df.columns)
     norm = [normalize_header(c) for c in cols]
@@ -125,12 +124,37 @@ def detect_def_col(def_df: pd.DataFrame, prop: str):
             return cols[i]
     return None
 
-# UI
-st.title("🏈 NFL Player Prop Model (v7.6)")
-st.write("This version predicts **one game** (not full season).")
+# -------------------------------
+# 5) UI Dropdowns
+# -------------------------------
+st.title("🏈 NFL Player Prop Model (v7.7)")
 
-player_name = st.text_input("Player name:")
-opponent_team = st.text_input("Opponent team (match defense sheets):")
+# combine player list from all sheets
+player_list = sorted(set(
+    list(p_rec["player"].dropna().unique()) +
+    list(p_rush["player"].dropna().unique()) +
+    list(p_pass["player"].dropna().unique())
+))
+team_list = sorted(set(
+    list(d_rb["team"].dropna().unique()) +
+    list(d_wr["team"].dropna().unique()) +
+    list(d_te["team"].dropna().unique()) +
+    list(d_qb["team"].dropna().unique())
+))
+
+player_name = st.selectbox(
+    "Select Player:",
+    options=[""] + player_list,
+    index=0,
+    help="Start typing a player's name to search"
+)
+opponent_team = st.selectbox(
+    "Select Opponent Team:",
+    options=[""] + team_list,
+    index=0,
+    help="Start typing a team's name to search"
+)
+
 prop_choices = [
     "passing_yards", "rushing_yards", "receiving_yards",
     "receptions", "targets", "carries", "anytime_td"
@@ -147,8 +171,11 @@ if not player_name or not opponent_team or not selected_props:
 
 st.header("📊 Results")
 
+# -------------------------------
+# 6) Prop Logic (same as v7.6)
+# -------------------------------
 for prop in selected_props:
-    # --- ANYTIME TD FIXED ---
+    # --- ANYTIME TD (Rushing + Receiving Combined) ---
     if prop == "anytime_td":
         st.subheader("🔥 Anytime TD (Rushing + Receiving + Defense Adjusted)")
 
@@ -173,7 +200,7 @@ for prop in selected_props:
 
         player_td_pg = total_tds / total_games
 
-        # Defensive TD context
+        # defensive TD context
         def_dfs = [d_rb.copy(), d_wr.copy(), d_te.copy()]
         for d in def_dfs:
             if "games_played" not in d.columns:
@@ -212,7 +239,7 @@ for prop in selected_props:
         st.plotly_chart(fig_td, use_container_width=True)
         continue
 
-    # --- ORIGINAL PROP LOGIC FROM v7.3 (UNCHANGED) ---
+    # --- OTHER PROPS (same as v7.6) ---
     if prop in ["receiving_yards", "receptions", "targets"]:
         player_df = find_player_in(p_rec, player_name)
         fallback_pos = "wr"
@@ -274,8 +301,6 @@ for prop in selected_props:
 
     st.subheader(prop.replace("_", " ").title())
     st.write(f"**Player (season):** {season_val:.2f} over {games_played:.0f} games → **{player_pg:.2f} per game**")
-    st.write(f"**Defense column used:** {def_col}")
-    st.write(f"**Opponent allowed per game:** {opp_allowed_pg:.2f}" if opp_allowed_pg is not None else "**Opponent allowed per game:** n/a")
     st.write(f"**Adjusted prediction (this game):** {predicted_pg:.2f}")
     st.write(f"**Line:** {line_val}")
     st.write(f"**Probability of OVER:** {prob_over*100:.1f}%")
