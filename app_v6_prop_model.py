@@ -204,18 +204,41 @@ for prop in selected_props:
     player_pos = player_df.iloc[0].get("position", fallback_pos)
     stat_col = detect_stat_col(player_df, prop)
 
-    if prop == "anytime_td":
-        st.subheader("Anytime TD")
-        td_cols = [c for c in player_df.columns if "td" in c]
-        games_col = "games_played" if "games_played" in player_df.columns else None
-        if td_cols and games_col:
-            total_tds = float(player_df.iloc[0][td_cols[0]])
-            gp = float(player_df.iloc[0][games_col]) or 1.0
-            td_pg = total_tds / gp
-            st.write(f"**Estimated TD rate:** {td_pg*100:.1f}%")
-        else:
-            st.write("Not enough TD data.")
+if prop == "anytime_td":
+    st.subheader("🔥 Anytime TD")
+
+    # Search across receiving → rushing → passing
+    player_df = find_player_in(p_rec, player_name)
+    if player_df is None or player_df.empty:
+        player_df = find_player_in(p_rush, player_name)
+    if player_df is None or player_df.empty:
+        player_df = find_player_in(p_pass, player_name)
+
+    if player_df is None or player_df.empty:
+        st.warning(f"❗ {player_name} not found in any player sheet.")
         continue
+
+    # Find all touchdown columns that belong to the player (exclude 'allowed')
+    td_cols = [c for c in player_df.columns if "td" in c and "allowed" not in c]
+    games_col = "games_played" if "games_played" in player_df.columns else None
+
+    if td_cols and games_col:
+        total_tds = player_df[td_cols].iloc[0].astype(float).sum()
+        gp = float(player_df.iloc[0][games_col]) or 1.0
+        td_pg = total_tds / gp
+
+        # Basic per-game probability (clip at 1.0 for 100%)
+        prob_td = min(td_pg, 1.0)
+
+        st.write(f"**TD columns used:** {', '.join(td_cols)}")
+        st.write(f"**Total TDs (season):** {total_tds:.1f}")
+        st.write(f"**Games Played:** {gp:.0f}")
+        st.write(f"**TDs per game:** {td_pg:.2f}")
+        st.write(f"**Estimated Anytime TD Probability:** {prob_td*100:.1f}%")
+
+    else:
+        st.warning("⚠️ No touchdown data found for this player.")
+    continue
 
     if not stat_col:
         st.warning(f"⚠️ For {prop}, no matching stat column found. Columns were: {list(player_df.columns)}")
