@@ -1,11 +1,10 @@
-# app_v7_2_prop_model.py
-# NFL Player Prop Model – Season Totals (v7.2)
-# - auto-cleans headers
-# - super-tolerant rushing/receiving/passing detection
-# - multi-prop
-# - Plotly
-# - debug sidebar
-# works with your 11 Google Sheets
+# app_v7_3_prop_model.py
+# NFL Player Prop Model – Season Totals → Single-Game Projection
+# - per-prop sheet selection (fixes your "it used receiving for rushing" bug)
+# - converts season totals → per-game
+# - adjusts by opponent defense per-game
+# - compares to sportsbook single-game line
+# - keeps Plotly + debug
 
 import streamlit as st
 import pandas as pd
@@ -14,11 +13,9 @@ from scipy.stats import norm
 import plotly.express as px
 import re
 
-st.set_page_config(page_title="NFL Player Prop Model (v7.2)", layout="centered")
+st.set_page_config(page_title="NFL Player Prop Model (v7.3)", layout="centered")
 
-# ---------------------------------------------------------
-# 1. GOOGLE SHEETS (your exact 11, CSV export links)
-# ---------------------------------------------------------
+# 1) your sheets (same as before)
 SHEETS = {
     "total_offense": "https://docs.google.com/spreadsheets/d/1DFZRqOiMXbIoEeLaNaWh-4srxeWaXscqJxIAHt9yq48/export?format=csv",
     "total_passing": "https://docs.google.com/spreadsheets/d/1QclB5ajymBsCC09j8s4Gie_bxj4ebJwEw4kihG6uCng/export?format=csv",
@@ -33,44 +30,29 @@ SHEETS = {
     "def_te": "https://docs.google.com/spreadsheets/d/1yMpgtx1ObYLDVufTMR5Se3KrMi1rG6UzMzLcoptwhi4/export?format=csv",
 }
 
-
-# ---------------------------------------------------------
-# 2. LOADING + NORMALIZING HEADERS
-# ---------------------------------------------------------
 def normalize_header(name: str) -> str:
     if not isinstance(name, str):
         name = str(name)
-    name = name.strip()
-    name = name.replace(" ", "_")
-    name = name.replace("__", "_")
-    name = name.lower()
-    # keep only letters / numbers / underscore
+    name = name.strip().replace(" ", "_").lower()
     name = re.sub(r"[^0-9a-z_]", "", name)
     return name
-
 
 def load_and_clean(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
     df.columns = [normalize_header(c) for c in df.columns]
-    # normalize team column
+    # normalize team
     if "team" in df.columns:
         df["team"] = df["team"].astype(str).str.strip()
     elif "teams" in df.columns:
         df["team"] = df["teams"].astype(str).str.strip()
     return df
 
-
 @st.cache_data(show_spinner=False)
-def load_all_sheets():
-    dfs = {}
-    for key, url in SHEETS.items():
-        dfs[key] = load_and_clean(url)
-    return dfs
+def load_all():
+    return {name: load_and_clean(url) for name, url in SHEETS.items()}
 
+data = load_all()
 
-data = load_all_sheets()
-
-# unpack
 p_rec = data["player_receiving"]
 p_rush = data["player_rushing"]
 p_pass = data["player_passing"]
@@ -79,194 +61,106 @@ d_qb = data["def_qb"]
 d_wr = data["def_wr"]
 d_te = data["def_te"]
 
-# ---------------------------------------------------------
-# 3. SIDEBAR DEBUG
-# ---------------------------------------------------------
+# sidebar debug
 with st.sidebar:
     st.header("🔎 Debug")
-    st.write("Rushing player sheet columns:", list(p_rush.columns))
-    st.write("Receiving player sheet columns:", list(p_rec.columns))
-    st.write("Passing player sheet columns:", list(p_pass.columns))
-    st.write("Def RB columns:", list(d_rb.columns))
-    st.write("Def QB columns:", list(d_qb.columns))
-    st.write("Def WR columns:", list(d_wr.columns))
-    st.write("Def TE columns:", list(d_te.columns))
-    st.write("If you see `rushing_yards_total` or similar here, the app should find it now.")
+    st.write("Receiving cols:", list(p_rec.columns))
+    st.write("Rushing cols:", list(p_rush.columns))
+    st.write("Passing cols:", list(p_pass.columns))
+    st.write("Def RB cols:", list(d_rb.columns))
+    st.write("Def WR cols:", list(d_wr.columns))
+    st.write("Def TE cols:", list(d_te.columns))
+    st.write("Note: v7.3 converts season totals → per-game before predicting.")
 
+# helper: find player in a specific df
+def find_player_in(df: pd.DataFrame, player_name: str):
+    if "player" not in df.columns:
+        return None
+    mask = df["player"].astype(str).str.lower() == player_name.lower()
+    return df[mask].copy() if mask.any() else None
 
-# ---------------------------------------------------------
-# 4. DETECTION HELPERS
-# ---------------------------------------------------------
-def detect_player_stat_col(player_df: pd.DataFrame, prop_type: str) -> str | None:
-    """
-    Try multiple ways to find the right column even if the sheet has small differences.
-    We normalize the headers so we can compare.
-    """
-    cols = list(player_df.columns)
-    norm_cols = [normalize_header(c) for c in cols]
+# detect stat column inside the df we picked
+def detect_stat_col(df: pd.DataFrame, prop: str):
+    cols = list(df.columns)
+    norm = [normalize_header(c) for c in cols]
 
-    if prop_type == "rushing_yards":
-        primary = [
-            "rushing_yards_total",
-            "rushingyards_total",
-            "rushing_yards_per_game",
-            "rushingyardspergame",
-        ]
-        secondary = [
-            "rushing_yards",
-            "rushingyards",
-            "rush_yards",
-            "rushyards",
-            "rushingyds",
-        ]
-    elif prop_type == "receiving_yards":
-        primary = [
-            "receiving_yards_total",
-            "receivingyards_total",
-            "receiving_yards_per_game",
-        ]
-        secondary = [
-            "receiving_yards",
-            "receivingyards",
-            "recyards",
-            "receivingyds",
-        ]
-    elif prop_type == "passing_yards":
-        primary = [
-            "passing_yards_total",
-            "passingyards_total",
-            "passing_yards_per_game",
-        ]
-        secondary = [
-            "passing_yards",
-            "passyards",
-            "passingyds",
-        ]
-    elif prop_type == "receptions":
-        primary = [
-            "receiving_receptions_total",
-            "receptions",
-        ]
-        secondary = [
-            "receivingreceptions",
-            "rec",
-        ]
-    elif prop_type == "targets":
-        primary = [
-            "receiving_targets_total",
-            "targets",
-        ]
-        secondary = [
-            "receivingtargets",
-        ]
-    elif prop_type == "carries":
-        primary = [
-            "rushing_attempts_total",
-            "rushing_carries_per_game",
-        ]
-        secondary = [
-            "rushing_attempts",
-            "rushingattempts",
-            "rushingcarries",
-        ]
+    if prop == "rushing_yards":
+        pri = ["rushing_yards_total", "rushing_yards_per_game", "rushingyards_total"]
+        sec = ["rushing", "rush"]
+    elif prop == "receiving_yards":
+        pri = ["receiving_yards_total", "receiving_yards_per_game", "receivingyards_total"]
+        sec = ["receiving", "rec"]
+    elif prop == "passing_yards":
+        pri = ["passing_yards_total", "passing_yards_per_game", "passingyards_total"]
+        sec = ["passing"]
+    elif prop == "receptions":
+        pri = ["receiving_receptions_total", "receptions"]
+        sec = ["receptions", "receivingreceptions"]
+    elif prop == "targets":
+        pri = ["receiving_targets_total", "targets"]
+        sec = ["receivingtargets"]
+    elif prop == "carries":
+        pri = ["rushing_attempts_total", "rushing_carries_per_game"]
+        sec = ["rushing_attempts", "rushingattempts", "rushingcarries"]
     else:
         return None
 
-    # 1) exact
-    for cand in primary:
-        if cand in norm_cols:
-            return cols[norm_cols.index(cand)]
-
-    # 2) partial
-    for cand in secondary:
-        for i, nc in enumerate(norm_cols):
+    # exact
+    for cand in pri:
+        if cand in norm:
+            return cols[norm.index(cand)]
+    # loose
+    for cand in sec:
+        for i, nc in enumerate(norm):
             if cand in nc:
                 return cols[i]
-
-    # 3) super-loose fallback
-    # e.g. anything with "rushing" and "yard"
-    if prop_type.startswith("rushing"):
-        for i, nc in enumerate(norm_cols):
-            if "rushing" in nc and "yard" in nc:
-                return cols[i]
-    if prop_type.startswith("receiving"):
-        for i, nc in enumerate(norm_cols):
-            if "receiving" in nc and "yard" in nc:
-                return cols[i]
-    if prop_type.startswith("passing"):
-        for i, nc in enumerate(norm_cols):
-            if "passing" in nc and "yard" in nc:
-                return cols[i]
-
     return None
 
-
-def pick_def_df(prop_type: str, player_pos: str | None):
-    if prop_type == "passing_yards":
+# pick defense df per prop
+def pick_def_df(prop: str, pos: str):
+    if prop == "passing_yards":
         return d_qb
-    if prop_type in ["rushing_yards", "carries"]:
-        if player_pos and player_pos.lower() == "qb":
-            return d_qb
-        return d_rb
-    if prop_type in ["receiving_yards", "receptions", "targets"]:
-        if player_pos and player_pos.lower() == "te":
+    if prop in ["rushing_yards", "carries"]:
+        return d_rb if pos != "qb" else d_qb
+    if prop in ["receiving_yards", "receptions", "targets"]:
+        if pos == "te":
             return d_te
-        if player_pos and player_pos.lower() == "rb":
+        if pos == "rb":
             return d_rb
         return d_wr
     return None
 
-
-def detect_def_col(def_df: pd.DataFrame, prop_type: str) -> str | None:
+# detect defense column
+def detect_def_col(def_df: pd.DataFrame, prop: str):
     cols = list(def_df.columns)
-    norm_cols = [normalize_header(c) for c in cols]
+    norm = [normalize_header(c) for c in cols]
 
-    if prop_type in ["rushing_yards", "carries"]:
-        prefs = [
-            "rushing_yards_allowed_total",
-            "rushing_yards_allowed",
-            "rushing_attempts_allowed",
-            "rushingattemptsallowed",
-        ]
-    elif prop_type in ["receiving_yards", "receptions", "targets"]:
-        prefs = [
-            "receiving_yards_allowed_total",
-            "receiving_yards_allowed",
-            "receiving_receptions_allowed",
-            "receiving_targets_allowed",
-        ]
-    elif prop_type == "passing_yards":
-        prefs = [
-            "passing_yards_allowed_total",
-            "passing_yards_allowed",
-            "passing_completions_allowed",
-            "passing_attempts_allowed",
-        ]
+    if prop in ["rushing_yards", "carries"]:
+        prefs = ["rushing_yards_allowed_total", "rushing_yards_allowed", "rushing_attempts_allowed"]
+    elif prop in ["receiving_yards", "receptions", "targets"]:
+        prefs = ["receiving_yards_allowed_total", "receiving_yards_allowed", "receiving_receptions_allowed", "receiving_targets_allowed"]
+    elif prop == "passing_yards":
+        prefs = ["passing_yards_allowed_total", "passing_yards_allowed", "passing_completions_allowed", "passing_attempts_allowed"]
     else:
         prefs = []
 
     for cand in prefs:
-        if cand in norm_cols:
-            return cols[norm_cols.index(cand)]
+        if cand in norm:
+            return cols[norm.index(cand)]
 
-    # fallback -> any "allowed"
-    for i, nc in enumerate(norm_cols):
+    for i, nc in enumerate(norm):
         if "allowed" in nc:
             return cols[i]
 
     return None
 
+# UI
+st.title("🏈 NFL Player Prop Model (v7.3)")
+st.write("This version predicts **one game** (not full season).")
 
-# ---------------------------------------------------------
-# 5. UI
-# ---------------------------------------------------------
-st.title("🏈 NFL Player Prop Model (v7.2 – Season Totals, auto-clean)")
-st.write("Enter a player, opponent, and select one or more props. This version should finally detect your **Rushing_Yards_Total** column.")
-
-player_name = st.text_input("Player name (exactly how it appears in your Google Sheets):")
-opponent_team = st.text_input("Opponent team (exactly as in defense sheets):")
-
-prop_options = [
+player_name = st.text_input("Player name:")
+opponent_team = st.text_input("Opponent team (match defense sheets):")
+prop_choices = [
     "passing_yards",
     "rushing_yards",
     "receiving_yards",
@@ -275,152 +169,126 @@ prop_options = [
     "carries",
     "anytime_td",
 ]
-selected_props = st.multiselect("Select props:", prop_options, default=["rushing_yards"])
+selected_props = st.multiselect("Select props:", prop_choices, default=["receiving_yards"])
 
 lines = {}
 for prop in selected_props:
     if prop != "anytime_td":
-        lines[prop] = st.number_input(f"Sportsbook line for {prop}", value=50.0, key=f"line_{prop}")
+        lines[prop] = st.number_input(f"Sportsbook line for {prop}", value=50.0, key=prop)
 
 if not player_name or not opponent_team or not selected_props:
     st.stop()
 
-
-# ---------------------------------------------------------
-# 6. FIND PLAYER (receiving → rushing → passing)
-# ---------------------------------------------------------
-def find_player(df: pd.DataFrame, name: str):
-    if "player" not in df.columns:
-        return None
-    mask = df["player"].astype(str).str.lower() == name.lower()
-    return df[mask].copy() if mask.any() else None
-
-
-player_df = find_player(p_rec, player_name)
-player_pos = None
-
-if player_df is not None:
-    player_pos = player_df.iloc[0].get("position", "wr")
-else:
-    player_df = find_player(p_rush, player_name)
-    if player_df is not None:
-        player_pos = player_df.iloc[0].get("position", "rb")
-    else:
-        player_df = find_player(p_pass, player_name)
-        if player_df is not None:
-            player_pos = "qb"
-
-if player_df is None:
-    st.error("❌ Player not found in any of the 3 player sheets.")
-    st.stop()
-
-
-# ---------------------------------------------------------
-# 7. PROCESS EACH PROP
-# ---------------------------------------------------------
 st.header("📊 Results")
 
 for prop in selected_props:
+    # 1) pick the right PLAYER sheet for THIS prop
+    if prop in ["receiving_yards", "receptions", "targets"]:
+        player_df = find_player_in(p_rec, player_name)
+        fallback_pos = "wr"
+    elif prop in ["rushing_yards", "carries"]:
+        player_df = find_player_in(p_rush, player_name)
+        fallback_pos = "rb"
+    elif prop == "passing_yards":
+        player_df = find_player_in(p_pass, player_name)
+        fallback_pos = "qb"
+    else:
+        # for anytime_td we’ll handle later
+        player_df = find_player_in(p_rec, player_name) or find_player_in(p_rush, player_name) or find_player_in(p_pass, player_name)
+        fallback_pos = "wr"
+
+    if player_df is None or player_df.empty:
+        st.warning(f"❗ {prop}: player '{player_name}' not found in the matching sheet for this prop.")
+        continue
+
+    player_pos = player_df.iloc[0].get("position", fallback_pos)
+    stat_col = detect_stat_col(player_df, prop)
+
     if prop == "anytime_td":
+        st.subheader("Anytime TD")
+        td_cols = [c for c in player_df.columns if "td" in c]
+        games_col = "games_played" if "games_played" in player_df.columns else None
+        if td_cols and games_col:
+            total_tds = float(player_df.iloc[0][td_cols[0]])
+            gp = float(player_df.iloc[0][games_col]) or 1.0
+            td_pg = total_tds / gp
+            st.write(f"**Estimated TD rate:** {td_pg*100:.1f}%")
+        else:
+            st.write("Not enough TD data.")
         continue
 
-    stat_col = detect_player_stat_col(player_df, prop)
     if not stat_col:
-        st.warning(f"⚠️ For **{prop}** I could not find a matching player column. Player sheet columns: {list(player_df.columns)}")
+        st.warning(f"⚠️ For {prop}, no matching stat column found. Columns were: {list(player_df.columns)}")
         continue
 
-    # player value
-    try:
-        player_val = float(player_df.iloc[0][stat_col])
-    except Exception:
-        player_val = 0.0
+    # 2) convert player to per game
+    season_val = float(player_df.iloc[0][stat_col])
+    games_played = float(player_df.iloc[0].get("games_played", 1)) or 1.0
+    player_pg = season_val / games_played
 
-    # get defense
+    # 3) get defense per game
     def_df = pick_def_df(prop, player_pos)
     def_col = detect_def_col(def_df, prop) if def_df is not None else None
 
-    # opponent row
-    if def_df is not None and "team" in def_df.columns:
-        opp_row = def_df[def_df["team"].astype(str).str.lower() == opponent_team.lower()]
-    else:
-        opp_row = None
-
-    # opponent allowed per game
-    opp_allowed = None
-    league_allowed = None
+    opp_allowed_pg = None
+    league_allowed_pg = None
     if def_df is not None and def_col is not None:
+        # league
         if "games_played" in def_df.columns:
-            # league avg
-            league_allowed = (def_df[def_col] / def_df["games_played"].replace(0, np.nan)).mean()
+            league_allowed_pg = (def_df[def_col] / def_df["games_played"].replace(0, np.nan)).mean()
         else:
-            league_allowed = def_df[def_col].mean()
+            league_allowed_pg = def_df[def_col].mean()
 
-        if opp_row is not None and not opp_row.empty:
+        # opponent
+        opp_row = def_df[def_df["team"].astype(str).str.lower() == opponent_team.lower()]
+        if not opp_row.empty:
             if "games_played" in opp_row.columns and float(opp_row.iloc[0]["games_played"]) > 0:
-                opp_allowed = float(opp_row.iloc[0][def_col]) / float(opp_row.iloc[0]["games_played"])
+                opp_allowed_pg = float(opp_row.iloc[0][def_col]) / float(opp_row.iloc[0]["games_played"])
             else:
-                opp_allowed = float(opp_row.iloc[0][def_col])
+                opp_allowed_pg = float(opp_row.iloc[0][def_col])
         else:
-            opp_allowed = league_allowed
+            opp_allowed_pg = league_allowed_pg
 
-    # adjustment
-    if league_allowed and league_allowed > 0 and opp_allowed is not None:
-        adj_factor = opp_allowed / league_allowed
+    # 4) defensive adjustment
+    if league_allowed_pg and league_allowed_pg > 0 and opp_allowed_pg is not None:
+        adj_factor = opp_allowed_pg / league_allowed_pg
     else:
         adj_factor = 1.0
 
-    predicted = player_val * adj_factor
+    predicted_pg = player_pg * adj_factor
 
-    # prob calc
+    # 5) probability vs line
     line_val = lines.get(prop, 0.0)
-    stdev = max(5.0, predicted * 0.15)
-    z = (line_val - predicted) / stdev
+    stdev = max(3.0, predicted_pg * 0.35)  # wider stdev for single game
+    z = (line_val - predicted_pg) / stdev
     prob_over = 1 - norm.cdf(z)
     prob_under = norm.cdf(z)
 
+    # clamp so we don’t show 100.0%
+    prob_over = float(np.clip(prob_over, 0.001, 0.999))
+    prob_under = float(np.clip(prob_under, 0.001, 0.999))
+
     st.subheader(prop.replace("_", " ").title())
-    st.write(f"**Matched player stat column:** `{stat_col}`")
-    st.write(f"**Player season total (from sheet):** {player_val:.2f}")
-    st.write(f"**Defense column used:** `{def_col}`" if def_col else "**Defense column used:** none (using player only)")
-    st.write(f"**Predicted stat:** {predicted:.2f}")
+    st.write(f"**Player (season):** {season_val:.2f} over {games_played:.0f} games → **{player_pg:.2f} per game**")
+    st.write(f"**Defense column used:** {def_col}")
+    st.write(f"**Opponent allowed per game:** {opp_allowed_pg:.2f}" if opp_allowed_pg is not None else "**Opponent allowed per game:** n/a")
+    st.write(f"**Adjusted prediction (this game):** {predicted_pg:.2f}")
     st.write(f"**Line:** {line_val}")
     st.write(f"**Probability of OVER:** {prob_over*100:.1f}%")
     st.write(f"**Probability of UNDER:** {prob_under*100:.1f}%")
 
-    # Plotly bar
+    # bar
     fig_bar = px.bar(
-        x=["Predicted", "Line"],
-        y=[predicted, line_val],
+        x=["Predicted (this game)", "Line"],
+        y=[predicted_pg, line_val],
         title=f"{player_name} – {prop.replace('_', ' ').title()}",
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # Fake trend so it looks good
+    # fake trend
     trend_df = pd.DataFrame({
         "Game": [1, 2, 3],
-        "Value": [player_val * 0.9, player_val, predicted],
+        "Value": [player_pg * 0.8, player_pg, predicted_pg],
     })
-    fig_line = px.line(
-        trend_df,
-        x="Game",
-        y="Value",
-        markers=True,
-        title=f"{player_name} – {prop.replace('_', ' ').title()} (simulated trend)",
-    )
+    fig_line = px.line(trend_df, x="Game", y="Value", markers=True, title=f"{player_name} – {prop.replace('_', ' ').title()} (simulated trend)")
     st.plotly_chart(fig_line, use_container_width=True)
-
-# ---------------------------------------------------------
-# 8. ANYTIME TD (simple)
-# ---------------------------------------------------------
-if "anytime_td" in selected_props:
-    st.subheader("🔥 Anytime TD (simple)")
-    # try to get any td-like column
-    td_cols = [c for c in player_df.columns if "td" in c]
-    games_col = "games_played" if "games_played" in player_df.columns else None
-    if td_cols and games_col:
-        total_tds = float(player_df.iloc[0][td_cols[0]])
-        games = float(player_df.iloc[0][games_col]) or 1.0
-        base_rate = total_tds / games
-        st.write(f"**Anytime TD probability (rough):** {base_rate*100:.1f}%")
-    else:
-        st.write("Not enough TD data to estimate.")
